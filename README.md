@@ -1,51 +1,39 @@
-﻿# 留白 · Daily Me
+﻿# daily me
 
-React、FastAPI 和 PostgreSQL 个人博客。设计与验收标准见 [SDD](docs/SDD.md)。
+个人博客使用 Vite 构建。文章的标题、摘要和 Markdown 全文保存在 `frontend/src/posts/*.json`，随前端一起发布到 GitHub Pages。访客可直接打开文章链接并刷新页面。
 
-- frontend/ 存放 React 页面、样式和 Vite 配置。
-- backend/ 存放 FastAPI 接口、数据库结构和 Python 依赖。
-- compose.yaml 和 Dockerfile 用于本机启动。
+## 在本地发布文章
 
-## 启动博客
+在项目根目录运行 `docker compose up -d --build`。发布服务使用根目录 `.env` 中的 `PUBLISH_TOKEN`，请设置至少 16 个字符的随机密钥。
 
-在仓库根目录运行：
+打开 http://127.0.0.1:8000/docs，在 POST /api/posts 的 Try it out 中填写标题、分类、摘要和 Markdown 正文。Authorization 字段填写 Bearer 加空格和发布密钥。上传成功后，文章文件会出现在前端源码目录。
+
+将新生成的 `frontend/src/posts/*.json` 提交到 `main`，推送到 GitHub Pages 仓库。现有的 Pages 工作流会重新构建并更新网站。
 
 ```powershell
-.\start-db.ps1
-docker compose up -d --build
-docker compose ps
+git add frontend/src/posts
+git commit -m "发布博客文章"
+git push pages main
 ```
 
-浏览器访问 http://localhost:8000，发布页为 http://localhost:8000/write，API 文档为 http://localhost:8000/docs。
-发布页的密钥是根目录 .env 中 PUBLISH_TOKEN 的值。若在新 checkout 中没有 .env，创建该文件并配置至少 16 字符的随机 ASCII 密钥。
+也可以使用 VS Code 的源代码管理界面提交和推送。文章图片可放在 `frontend/public/images/`，Markdown 里用 `/images/文件名` 引用，并与文章一起提交。
 
-Docker Desktop 中独立的 daily_me 容器映射本机 5435，Compose 管理的博客服务映射本机 8000。脚本沿用 daily_me_blog_data 数据卷。
+## 导出旧数据库中的文章
 
-## 本地开发
-
-先在根目录运行 .\start-db.ps1。前端在 frontend/ 运行 npm install 和 npm run dev。后端在 backend/ 安装 requirements.txt，设置 PUBLISH_TOKEN 和 DATABASE_URL，再运行 python -m uvicorn main:app --reload。本机数据库地址为 postgresql://daily_me:local_daily_me@127.0.0.1:5435/daily_me。
-
-
-
-### Docker Hub 拉取超时时
-
-数据库容器保持运行。在项目根目录打开两个 PowerShell 终端。
-
-后端终端：
+如果旧 PostgreSQL 数据库里已有文章，先保持旧数据库运行，在根目录执行以下命令。已有的同 ID 文件会保留。
 
 ```powershell
 python -m pip install -r backend/requirements.txt
 $env:DATABASE_URL = 'postgresql://daily_me:local_daily_me@127.0.0.1:5435/daily_me'
-$env:PUBLISH_TOKEN = (Get-Content .env | Where-Object { $_ -match '^PUBLISH_TOKEN=' } | Select-Object -First 1) -replace '^PUBLISH_TOKEN=', ''
-python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
+python backend/export_posts.py
 ```
 
-前端终端：
+导出后检查文章，再把生成的 JSON 一起提交。旧文章的静态链接格式为 `/?post=原文章ID`。
 
-```powershell
-cd frontend
-npm.cmd install
-npm.cmd run dev
-```
+## 绑定自定义域名
 
-用浏览器打开 Vite 输出的 Local 地址（通常是 http://localhost:5173）。API 文档在 http://localhost:8000/docs。
+1. 打开 [仓库的 Pages 设置](https://github.com/pink-td/pink-td.github.io/settings/pages)，在 **Custom domain** 输入你的域名并保存。只填域名，例如 `blog.example.com`。
+2. 到域名的 DNS 管理页面添加记录。子域名使用 CNAME，主机记录填 `blog` 或 `www`，目标填 `pink-td.github.io`。根域名使用四条 A 记录，主机记录均为 `@`，分别指向 `185.199.108.153`、`185.199.109.153`、`185.199.110.153` 和 `185.199.111.153`。
+3. DNS 检查通过且证书就绪后，在 Pages 设置勾选 **Enforce HTTPS**。
+
+[GitHub 官方自定义域名文档](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)

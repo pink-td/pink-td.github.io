@@ -1,33 +1,17 @@
-﻿import os
-from contextlib import asynccontextmanager
+﻿import json
+import os
+from datetime import datetime, timezone
 from hmac import compare_digest
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Annotated
+from uuid import uuid4
 
-import psycopg
-from fastapi import FastAPI, Header, HTTPException, Path as RoutePath, Query
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from psycopg.rows import dict_row
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, StringConstraints
 
-
-def connect():
-    return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
-
-
-@asynccontextmanager
-async def lifespan(app):
-    key = os.environ["PUBLISH_TOKEN"]
-    if len(key) < 16:
-        raise RuntimeError("PUBLISH_TOKEN must contain at least 16 characters")
-    with connect() as db:
-        db.execute(Path(__file__).with_name("schema.sql").read_text(encoding="utf-8-sig"))
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-metadata = "id, title, category, summary, published_at"
+app = FastAPI()
+posts_dir = Path(__file__).resolve().parents[1] / "frontend" / "src" / "posts"
 
 
 class Draft(BaseModel):
@@ -37,44 +21,31 @@ class Draft(BaseModel):
     body: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100000)]
 
 
-@app.get("/api/posts")
-def list_posts(limit: Annotated[int, Query(ge=1, le=100)] = 20,
-               offset: Annotated[int, Query(ge=0)] = 0):
-    with connect() as db:
-        return db.execute(
-            f"SELECT {metadata} FROM posts ORDER BY published_at DESC, id DESC LIMIT %s OFFSET %s",
-            (limit, offset),
-        ).fetchall()
-
-
-@app.get("/api/posts/{post_id}")
-def read_post(post_id: Annotated[int, RoutePath(ge=1, le=9223372036854775807)]):
-    with connect() as db:
-        post = db.execute("SELECT * FROM posts WHERE id = %s", (post_id,)).fetchone()
-    if post is None:
-        raise HTTPException(404, "文章不存在")
-    return post
+def save_post(post):
+    posts_dir.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(post, ensure_ascii=False, indent=2) + "\n"
+    with NamedTemporaryFile(dir=posts_dir, delete=False) as file:
+        temporary = Path(file.name)
+        try:
+            file.write(content.encode("utf-8"))
+        except BaseException:
+            file.close()
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(posts_dir / f"{post['id']}.json")
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @app.post("/api/posts", status_code=201)
 def publish(draft: Draft, authorization: Annotated[str, Header()] = ""):
-    expected = "Bearer " + os.environ["PUBLISH_TOKEN"]
-    if not compare_digest(authorization.encode(), expected.encode()):
-        raise HTTPException(401, "发布密钥无效", headers={"WWW-Authenticate": "Bearer"})
-    with connect() as db:
-        return db.execute(
-            "INSERT INTO posts (title, category, summary, body) VALUES (%s, %s, %s, %s) RETURNING *",
-            (draft.title, draft.category, draft.summary, draft.body),
-        ).fetchone()
+    token = os.environ.get("PUBLISH_TOKEN", "")
+    if len(token) < 16:
+        raise HTTPException(503, "Configure PUBLISH_TOKEN with at least 16 characters.")
+    if not compare_digest(authorization.encode(), f"Bearer {token}".encode()):
+        raise HTTPException(401, "Invalid publish token", headers={"WWW-Authenticate": "Bearer"})
 
-
-dist = Path(__file__).with_name("dist")
-if dist.is_dir():
-    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
-
-    @app.get("/", include_in_schema=False)
-    @app.get("/write", include_in_schema=False)
-    @app.get("/posts/{post_id}", include_in_schema=False)
-    def frontend():
-        return FileResponse(dist / "index.html")
-
+    post = draft.model_dump() | {"id": uuid4().hex, "published_at": datetime.now(timezone.utc).isoformat()}
+    save_post(post)
+    return post
