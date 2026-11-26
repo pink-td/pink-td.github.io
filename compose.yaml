@@ -1,9 +1,0 @@
-name: daily-me-app
-services:
-  blog:
-    build: .
-    ports: ["127.0.0.1:8000:8000"]
-    environment:
-      PUBLISH_TOKEN: ${PUBLISH_TOKEN:-}
-    volumes:
-      - ./frontend/src:/project/frontend/src
