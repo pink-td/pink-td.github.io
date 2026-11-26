@@ -1,36 +1,42 @@
-# 第一次把大模型跑在自己电脑上：llama.cpp 实录与 vLLM 部署笔记
+# Today 的 llama.cpp 和 vLLM 部署学习过程
 
-今天折腾本地模型，我问得最多的一句是「这个是什么？」。CUDA 是什么，GGUF 里面到底装了什么，为什么我下载解压以后只有三个 DLL，还有模型都训练好了，怎么每问一句还得让显卡重新算？
+今天折腾本地模型，我最多干的事情是去问deepseek这个东西是干什么的。CUDA 是什么，GGUF 里面到底装了什么，为什么我下载解压以后只有三个 DLL，还有模型都训练好了，怎么每问一句还得让显卡重新算？
 
-这些问题听着挺基础，但我真正动手的时候，卡住的恰好就是这些地方。最后跑通的是 **Windows 上的 llama.cpp + Qwen3.5-4B**，用的是我这台电脑上的 **RTX 5060，8 GB 显存**。vLLM 也做了选型和部署准备，这次先把 llama.cpp 跑起来，vLLM 留作下一轮实测。
+因为以前没怎么接触过这方面，所以很多概念都不是很清楚，卡住的地方也比较多。
 
-## 起因：想让项目多一个本地模型入口
+最后在本地运行的是 **Windows 上的 llama.cpp + Qwen3.5-4B**，用的是我这台电脑上的 **RTX 5060，8 GB 显存**。vLLM 也做了选型和部署准备，这次先把 llama.cpp 跑起来，vLLM 留作下一轮实测。
+
+## 水天哥下达的task，也顺手让dump_agents多一个本地模型入口
 
 我的项目原来走第三方 API。后端把问题和对话历史放进 `messages`，发给模型服务，再把答案展示在终端里。项目还有个 `callback_memory` 工具，模型遇到依赖历史的问题时，可以让后端去 PostgreSQL 召回相关记忆。
 
 我想保留原来的 API，同时加一个 llama.cpp 入口，按需要切换。做到最后才发现，项目接入这部分其实挺直观。llama.cpp 可以在本机提供 OpenAI 兼容接口，后端还是发 `messages`，只是请求地址换成了 `http://127.0.0.1:8080/v1`。这里的 `127.0.0.1` 就是本机，`8080` 是模型服务监听的端口。后端会在地址后面拼上 `/chat/completions`。
 
-现在项目用 `config.toml` 选择入口。`third_party` 继续读原来的 `.env` 配置，`llamacpp` 则连本地服务。对我来说，真正花时间的是先弄明白怎样让 `8080` 上有个服务能回答问题。
+现在项目用 `config.toml` 选择入口。`third_party` 继续读原来的 `.env` 配置，`llamacpp` 则连本地服务。
 
-## 第一坑：下载了 CUDA 包，解压出来只有三个 DLL
+## 下载了 CUDA 包，解压出来只有三个 DLL
 
 GitHub Releases 里那行写的是 `Windows x64 (CUDA 13) - CUDA 13.5 DLLs`。我点了右边，下载解压，打开文件夹一看，三个 `.dll`，连个能执行的文件都没有。
 
 原来这一行里有**两个下载链接**。左边是主程序，里面有 `llama-server.exe`，右边是它需要的 CUDA 运行库。下载对应的两个 ZIP，把运行库放到 `llama-server.exe` 同一目录，才算把程序备齐。
 
-我当时也顺着问了句「CUDA 到底是什么」。现在我的理解是，RTX 5060 是实际干活的硬件，CUDA 是 NVIDIA 提供的软件接口和工具，llama.cpp 通过它安排显卡做模型计算。装好之后，我先跑了：
+这里因为这一串以前没太关心过，所以特地去搜了一下这里面的CUDA 13，DLLs这些都什么意思。
+
+现在大概了解，RTX 5060 是实际干活的硬件，CUDA 是 NVIDIA 提供的软件接口和工具，llama.cpp 通过它安排显卡做模型计算。
+
+装好之后，我先跑了：
 
 ```powershell
 .\llama-server.exe --list-devices
 ```
 
-看到 `CUDA0: NVIDIA GeForce RTX 5060` 的时候，心里终于有底了。这条命令列完显卡就会退回提示符。之后真正启动模型服务，窗口才会一直开着等请求。
+这条命令列完显卡就会退回提示符。之后真正启动模型服务，窗口才会一直开着等请求。
 
-## 第二坑：从自动下载失败，到用绝对路径加载
+## 过于依赖agent经常下载失败
 
 本来以为接下来一句 `-hf` 就能搞定。它确实能让 llama.cpp 自动从 Hugging Face 下载权重，但我这边连接超时了。日志后面跟着好几条 `failed to load model`，看起来像模型哪里配错了。往前翻，第一条错误其实是 `Could not establish connection`。下载这一步就没过去，后面自然也加载不了。
 
-于是我改成浏览器手动下载两个文件：`Qwen3.5-4B-Q4_K_M.gguf` 是主模型，`mmproj-Qwen3.5-4B-BF16.gguf` 是配套的视觉组件，用来做图片问答。 [模型文件目录](https://huggingface.co/ggml-org/Qwen3.5-4B-GGUF/tree/main)
+于是我改成浏览器手动下载两个文件：`Qwen3.5-4B-Q4_K_M.gguf` 是主模型，`mmproj-Qwen3.5-4B-BF16.gguf` 是配套的视觉组件，用来做图片问答。
 
 接着又踩了一个最普通的坑。文件下载到了 `Downloads`，我的 PowerShell 却开在 `Downloads` 下的 llama.cpp 子目录。命令只写了文件名，程序就从当前目录找，两个文件一起报 `No such file or directory`。最后保留原来的文件位置，给 `-m` 和 `--mmproj` 都填上绝对路径，服务就起来了。
 
